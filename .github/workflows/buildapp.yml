@@ -1,3 +1,4 @@
+
 # Original idea by @ISnackable. Many thanks to him for handling the most hardest parts!
 # https://github.com/ISnackable/YTCubePlus/blob/main/.github/workflows/Build.yml
 
@@ -60,6 +61,72 @@ jobs:
           path: main
           submodules: recursive
 
+      - name: Patch YouPiP compile errors
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          settings = Path("main/Tweaks/YouPiP/Settings.x")
+          legacy = Path("main/Tweaks/YouPiP/LegacyPiPCompat.x")
+
+          if not settings.is_file():
+              raise SystemExit(f"Settings.x not found: {settings}")
+          if not legacy.is_file():
+              raise SystemExit(f"LegacyPiPCompat.x not found: {legacy}")
+
+          s = settings.read_text()
+          old = "NSMutableArray *mutableCategories = %orig.mutableCopy;"
+          new = (
+              "NSArray *categories = %orig;\n"
+              "    NSMutableArray *mutableCategories = categories.mutableCopy;"
+          )
+
+          if old in s:
+              s = s.replace(old, new, 1)
+              settings.write_text(s)
+              print("Patched Settings.x")
+          elif "NSArray *categories = %orig;" in s:
+              print("Settings.x already contains the fix")
+          else:
+              raise SystemExit("Settings.x did not match the expected source version")
+
+          s = legacy.read_text()
+          replacements = [
+              (
+                  "return initPlayerPIPControllerIfNeeded(%orig, delegate, nil);",
+                  "YTPlayerPIPController *controller = %orig;\n"
+                  "    return initPlayerPIPControllerIfNeeded(controller, delegate, nil);",
+              ),
+              (
+                  "return initPlayerPIPControllerIfNeeded(%orig, delegate, parentResponder);",
+                  "YTPlayerPIPController *controller = %orig;\n"
+                  "    return initPlayerPIPControllerIfNeeded(controller, delegate, parentResponder);",
+              ),
+          ]
+
+          changed = 0
+          for old, new in replacements:
+              if old in s:
+                  s = s.replace(old, new, 1)
+                  changed += 1
+
+          if changed == 2:
+              legacy.write_text(s)
+              print("Patched both LegacyPiPCompat.x methods")
+          elif changed == 0 and "initPlayerPIPControllerIfNeeded" not in s:
+              raise SystemExit(
+                  "LegacyPiPCompat.x is a different version from the one "
+                  "in the original build errors. No patch was applied."
+              )
+          elif changed == 0:
+              print("LegacyPiPCompat.x may already be patched; checking build output will confirm.")
+          else:
+              raise SystemExit(
+                  "Only one expected LegacyPiPCompat.x method was found. "
+                  "Stopped to avoid a partial patch."
+              )
+          PY
+
       - name: Install Dependencies
         run: brew install ldid dpkg make
 
@@ -113,30 +180,28 @@ jobs:
         id: prepare_youtube
         run: |
           wget "$YOUTUBE_URL" --no-verbose -O main/YouTube.ipa
-          cd ${{ github.workspace }}/main
+          cd "${{ github.workspace }}/main"
           mv YouTube.ipa YouTube.zip
           unzip -q YouTube.zip
           youtube_version=$(defaults read "$(pwd)/Payload/YouTube.app/Info" CFBundleVersion)
           echo "==> YouTube v$youtube_version downloaded!"
           sed -i '' "17s#.*#YOUTUBE_VERSION = ${youtube_version}#g" Makefile
-          echo "youtube_version=${youtube_version}" >> $GITHUB_OUTPUT
-
+          echo "youtube_version=${youtube_version}" >> "$GITHUB_OUTPUT"
         env:
           THEOS: ${{ github.workspace }}/theos
           YOUTUBE_URL: ${{ inputs.decrypted_youtube_url }}
 
-      - name: Fix compiling & Build Package
+      - name: Build Package
         id: build_package
         run: |
-          cd ${{ github.workspace }}/main
-          sed -i '' "27s#.*#BUNDLE_ID = ${{ inputs.bundle_id }}#g" Makefile                          # Modify the bundle ID
-          sed -i '' "26s#.*#DISPLAY_NAME = ${{ inputs.app_name }}#g" Makefile                        # Modify the app name
-          sed -i '' "1s#.*#export TARGET = iphone:clang:${{ inputs.sdk_version }}:14.0#g" Makefile # Modify the SDK version
+          cd "${{ github.workspace }}/main"
+          sed -i '' "27s#.*#BUNDLE_ID = ${{ inputs.bundle_id }}#g" Makefile
+          sed -i '' "26s#.*#DISPLAY_NAME = ${{ inputs.app_name }}#g" Makefile
+          sed -i '' "1s#.*#export TARGET = iphone:clang:${{ inputs.sdk_version }}:14.0#g" Makefile
           make package THEOS_PACKAGE_SCHEME=rootless IPA=Payload/YouTube.app FINALPACKAGE=1
-          echo "package=$(ls -t packages | head -n1)" >>$GITHUB_OUTPUT
-          echo -e "==> \033[1mSHASUM256: $(shasum -a 256 packages/*.ipa | cut -f1 -d' ')\033[0m"
-          echo -e "==> \033[1mBundle ID: ${{ inputs.bundle_id }}\033[0m"
-
+          echo "package=$(ls -t packages | head -n1)" >> "$GITHUB_OUTPUT"
+          echo "SHASUM256: $(shasum -a 256 packages/*.ipa | cut -f1 -d' ')"
+          echo "Bundle ID: ${{ inputs.bundle_id }}"
         env:
           THEOS: ${{ github.workspace }}/theos
           REBORN_VERSION: ${{ inputs.reborn_version }}
